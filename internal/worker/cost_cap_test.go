@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -111,6 +112,7 @@ type capRunner struct {
 	jobs     []SkillJob
 	first    func(ctx context.Context, emit func(Event)) (SkillResult, error)
 	finalize func(sj SkillJob) (SkillResult, error)
+	next     func(context.Context, SkillJob, func(Event)) (SkillResult, error)
 }
 
 func (c *capRunner) RunSkill(ctx context.Context, sj SkillJob, emit func(Event)) (SkillResult, error) {
@@ -120,6 +122,9 @@ func (c *capRunner) RunSkill(ctx context.Context, sj SkillJob, emit func(Event))
 	c.mu.Unlock()
 	if n == 1 {
 		return c.first(ctx, emit)
+	}
+	if c.next != nil {
+		return c.next(ctx, sj, emit)
 	}
 	return c.finalize(sj)
 }
@@ -337,5 +342,138 @@ func TestDoSkill_operatorCancelIsNotACostCap(t *testing.T) {
 	}
 	if got.Status != db.ScanCancelled || got.CostCapped {
 		t.Errorf("status %s capped %v, want cancelled and not capped", got.Status, got.CostCapped)
+	}
+}
+
+const capRepairSchema = `{"type":"object","required":["complete"],"properties":{"complete":{"type":"boolean"}}}`
+
+func completedCapRun(cost float64, report string) func(context.Context, func(Event)) (SkillResult, error) {
+	return func(_ context.Context, emit func(Event)) (SkillResult, error) {
+		emit(Event{Kind: KindSession, SessionID: "sess-followup"})
+		emit(Event{Kind: KindResult, SessionCostUSD: cost})
+		return SkillResult{Report: report}, nil
+	}
+}
+
+func TestDoSkill_costCapCoversSchemaRepair(t *testing.T) {
+	for _, finalReport := range []string{`{"complete":false}`, `{}`} {
+		t.Run(finalReport, func(t *testing.T) {
+			testSchemaRepairCostCap(t, finalReport)
+		})
+	}
+}
+
+func testSchemaRepairCostCap(t *testing.T, finalReport string) {
+	t.Helper()
+	w, scan := costCapFixture(t, 1)
+	w.SchemaStrict = true
+	if err := w.DB.Model(&db.Skill{}).Where("id = ?", *scan.SkillID).Update("schema_json", capRepairSchema).Error; err != nil {
+		t.Fatal(err)
+	}
+	runner := &capRunner{first: completedCapRun(0.4, `{}`)}
+	runner.next = func(ctx context.Context, job SkillJob, emit func(Event)) (SkillResult, error) {
+		switch len(runner.jobs) {
+		case 2:
+			if job.MaxTurns != schemaRepairMaxTurns {
+				t.Fatal("expected schema repair")
+			}
+			emit(Event{Kind: KindUsage, CostUSD: 0.7})
+			if !errors.Is(context.Cause(ctx), errCostCapped) {
+				t.Fatal("schema repair continued beyond the remaining budget")
+			}
+			return SkillResult{}, ctx.Err()
+		case 3:
+			if job.MaxTurns != costCapFinalizeMaxTurns || !strings.Contains(job.ResumePrompt, "cost budget") || ctx.Err() != nil {
+				t.Fatal("expected bounded finalization on the live parent context")
+			}
+			emit(Event{Kind: KindResult, SessionCostUSD: 1.3})
+			return SkillResult{Report: finalReport}, nil
+		default:
+			t.Fatal("another model call ran after cost-cap finalization")
+			return SkillResult{}, nil
+		}
+	}
+	w.Runner = runner
+	got := runCapScan(t, w, scan)
+	wantStatus := db.ScanDone
+	if finalReport == `{}` {
+		wantStatus = db.ScanFailed
+	}
+	if len(runner.jobs) != 3 {
+		t.Fatalf("calls=%d, want 3", len(runner.jobs))
+	}
+	assertCostCappedReport(t, got, wantStatus, finalReport)
+	if math.Abs(got.CostUSD-1.3) > 1e-9 || math.Abs(got.SessionCostUSD-1.3) > 1e-9 {
+		t.Fatalf("cost=%v session=%v; interrupted usage was not reconciled", got.CostUSD, got.SessionCostUSD)
+	}
+}
+
+func TestDoSkill_costCapRetainsInterruptedRepairReport(t *testing.T) {
+	w, scan := costCapFixture(t, 1)
+	w.SchemaStrict = true
+	if err := w.DB.Model(&db.Skill{}).Where("id = ?", *scan.SkillID).Update("schema_json", capRepairSchema).Error; err != nil {
+		t.Fatal(err)
+	}
+	const repairedReport = `{"complete":false}`
+	runner := &capRunner{first: completedCapRun(0.4, `{}`)}
+	runner.next = func(ctx context.Context, _ SkillJob, emit func(Event)) (SkillResult, error) {
+		switch len(runner.jobs) {
+		case 2:
+			emit(Event{Kind: KindUsage, CostUSD: 0.7})
+			return SkillResult{Report: repairedReport}, ctx.Err()
+		case 3:
+			return SkillResult{}, errors.New("finalization failed")
+		default:
+			t.Fatal("another model call ran after cost-cap finalization")
+			return SkillResult{}, nil
+		}
+	}
+	w.Runner = runner
+	got := runCapScan(t, w, scan)
+	if len(runner.jobs) != 3 {
+		t.Fatalf("calls=%d, want 3", len(runner.jobs))
+	}
+	assertCostCappedReport(t, got, db.ScanDone, repairedReport)
+}
+
+func assertCostCappedReport(t *testing.T, got db.Scan, status db.ScanStatus, report string) {
+	t.Helper()
+	if got.Status != status || !got.CostCapped || got.Report != report || got.Completeness != coverage.CompletenessPartial {
+		t.Fatalf("status=%s capped=%v report=%s completeness=%s", got.Status, got.CostCapped, got.Report, got.Completeness)
+	}
+}
+
+func TestDoSkill_costCapCoversRefusalAudit(t *testing.T) {
+	for _, primaryCost := range []float64{0.4, 1.2} {
+		t.Run(fmt.Sprint(primaryCost), func(t *testing.T) {
+			w, scan := costCapFixture(t, 1)
+			if err := w.DB.Model(&db.Skill{}).Where("id = ?", *scan.SkillID).Update("name", refusalAuditSkillName).Error; err != nil {
+				t.Fatal(err)
+			}
+			runner := &capRunner{first: completedCapRun(primaryCost, `{"findings":[]}`)}
+			runner.next = func(ctx context.Context, job SkillJob, emit func(Event)) (SkillResult, error) {
+				if primaryCost >= 1 || len(runner.jobs) != 2 || job.OutputFile != refusalAuditOutputFile {
+					t.Fatal("unexpected follow-up after budget exhaustion")
+				}
+				emit(Event{Kind: KindUsage, CostUSD: 0.7})
+				if !errors.Is(context.Cause(ctx), errCostCapped) {
+					t.Fatal("refusal audit continued beyond the remaining budget")
+				}
+				return SkillResult{}, ctx.Err()
+			}
+			w.Runner = runner
+			got := runCapScan(t, w, scan)
+			wantCost, wantCalls := primaryCost, 1
+			if primaryCost < 1 {
+				wantCost += 0.7
+				wantCalls++
+			}
+			if len(runner.jobs) != wantCalls || got.Status != db.ScanDone || !got.CostCapped || got.Report != `{"findings":[]}` || got.RefusalAudit != "" {
+				t.Fatalf("calls=%d status=%s capped=%v report=%s audit=%s", len(runner.jobs), got.Status, got.CostCapped, got.Report, got.RefusalAudit)
+			}
+			if math.Abs(got.CostUSD-wantCost) > 1e-9 || got.Completeness != coverage.CompletenessPartial {
+				t.Fatalf("cost=%v completeness=%s", got.CostUSD, got.Completeness)
+			}
+		})
 	}
 }

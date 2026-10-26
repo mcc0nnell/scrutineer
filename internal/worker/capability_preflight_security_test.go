@@ -101,7 +101,7 @@ func testPreflightFallbackAndRepair(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	scan.SessionID = "repair-session"
-	if _, ok := w.repairSchemaReport(t.Context(), &skill, &scan, sj, "invalid", "invalid JSON", emit); !ok {
+	if _, ok, err := w.repairSchemaReport(t.Context(), &skill, &scan, sj, "invalid", "invalid JSON", emit); err != nil || !ok {
 		t.Fatal("schema repair failed after context mutation")
 	}
 	if runner.calls != 3 || probes != 1 || scan.ScopeMode != "soft" {

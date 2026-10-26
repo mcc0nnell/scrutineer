@@ -29,9 +29,9 @@ func (a refusalAudit) warning() bool {
 	return a.Refused || len(a.Skipped) > 0
 }
 
-func (w *Worker) auditSkillRefusals(ctx context.Context, skill *db.Skill, scan *db.Scan, sj SkillJob, emit func(Event)) {
+func (w *Worker) auditSkillRefusals(ctx context.Context, skill *db.Skill, scan *db.Scan, sj SkillJob, emit func(Event)) error {
 	if skill.Name != refusalAuditSkillName || scan.SessionID == "" {
-		return
+		return nil
 	}
 
 	emit(Event{Kind: KindText, Text: "refusal audit: asking the agent to account for skipped analysis"})
@@ -40,16 +40,19 @@ func (w *Worker) auditSkillRefusals(ctx context.Context, skill *db.Skill, scan *
 	auditJob.ResumePrompt = buildRefusalAuditPrompt()
 	auditJob.OutputFile = refusalAuditOutputFile
 	auditJob.MaxTurns = refusalAuditMaxTurns
-	res, err := w.Runner.RunSkill(ctx, auditJob, emit)
-	w.applySkillResult(scan, res)
+	res, err := w.runFollowupSkill(ctx, scan, auditJob, emit)
+	if errors.Is(err, errCostCapped) {
+		emit(Event{Kind: KindText, Text: "refusal audit stopped at the cost cap; primary report retained"})
+		return err
+	}
 	if err != nil {
 		emit(Event{Kind: KindError, Text: fmt.Sprintf("refusal audit failed: %v; primary report retained", err)})
-		return
+		return nil
 	}
 	audit, err := parseRefusalAudit(res.Report)
 	if err != nil {
 		emit(Event{Kind: KindError, Text: fmt.Sprintf("refusal audit ignored: %v", err)})
-		return
+		return nil
 	}
 
 	scan.RefusalAudit = res.Report
@@ -57,6 +60,7 @@ func (w *Worker) auditSkillRefusals(ctx context.Context, skill *db.Skill, scan *
 	if scan.RefusalAuditWarning {
 		emit(Event{Kind: KindText, Text: "refusal audit: analysis was refused or skipped; see scan details"})
 	}
+	return nil
 }
 
 func buildRefusalAuditPrompt() string {
