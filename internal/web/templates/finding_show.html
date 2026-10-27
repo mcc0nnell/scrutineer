@@ -15,6 +15,12 @@
     {{template "finding-status" (fstatus $f.Status)}}
   </h2>
   <div class="flex gap-2 shrink-0">
+    {{if .HasRizzerWitness}}
+    <a href="/api/v1/findings/{{$f.ID}}/rizzer-witness" class="btn-outline" download="candidate-evidence.zip"
+       title="Download original Rizzer crash input and diagnostic evidence; unverified candidate">
+      <i data-lucide="archive"></i> Rizzer witness
+    </a>
+    {{end}}
     {{if .AkritesLink}}
     <a href="/findings/{{$f.ID}}/akrites" class="btn-outline">Akrites submission</a>
     {{end}}

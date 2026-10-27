@@ -2143,6 +2143,7 @@ func (s *Server) findingShow(w http.ResponseWriter, r *http.Request) {
 		pageTitleKey:          f.Title + " · " + repo.Name,
 		"F":                   f,
 		"HasDisclosureDraft":  strings.TrimSpace(f.DisclosureDraft) != "",
+		"HasRizzerWitness":    s.hasRizzerWitness(f),
 		"Scan":                scan,
 		"Repo":                repo,
 		"Notes":               notes,

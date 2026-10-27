@@ -2,6 +2,8 @@
 
 Scrutineer can ingest vulnerability reports produced by external scanners or written by hand and turn them into the same `Repository`, `Scan`, and `Finding` rows a native scan produces. Imported findings carry through the rest of the workflow unchanged: `verify`, `reachability`, `patch`, `disclose`, and the dedup-on-rescan machinery all treat them as first-class.
 
+For native fuzzing findings produced by Rizzer, see [attaching a reviewed crash witness](rizzer-witness.md) to retain exact input bytes alongside an imported SARIF candidate. This uses Scrutineer's existing persistent PoC storage and is a separate operator-controlled step.
+
 The endpoint is `POST /api/v1/import` on the operator `/api/v1` surface, so the request needs the operator token as a bearer and a loopback `Host` (see [the API overview](api.md#operator-api-apiv1)). The body is sniffed; the format is not in the URL.
 
 ## Using it

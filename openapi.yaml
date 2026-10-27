@@ -1332,6 +1332,69 @@ paths:
         '409': { description: Finding has queued, running, or paused scans }
         '500': { description: Delete failed }
 
+  /v1/findings/{id}/rizzer-witness:
+    post:
+      summary: Attach a reviewed Rizzer crash witness to an imported finding
+      description: |
+        Operator-only. Accepts a bounded, uncompressed Rizzer witness ZIP
+        matching the imported SARIF candidate's campaign evidence digest,
+        source revision and harness location. Requires the explicit
+        X-Rizzer-Candidate-Reviewed header. Stores the exact ZIP as immutable
+        FindingPoC data. Not a proof of exploitability or a signature.
+        Existing nonmatching PoC material is never overwritten. Since
+        persistent PoC bytes are included in manual disclosure bundles,
+        inspect logs for secrets before uploading or sharing a bundle.
+      operationId: attachRizzerWitness
+      security: [{ operatorToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: X-Rizzer-Candidate-Reviewed
+          in: header
+          required: true
+          schema: { type: string, enum: ['true'] }
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema: { type: string, format: binary, maxLength: 1048576 }
+      responses:
+        '201': { description: Evidence attached }
+        '200': { description: Identical evidence was already attached }
+        '400': { description: Missing human review acknowledgement or malformed finding ID }
+        '401': { description: Operator authentication required }
+        '403': { description: Host is not loopback }
+        '404': { description: Finding not found }
+        '409': { description: Finding already has different PoC material }
+        '413': { description: ZIP exceeds the persistent PoC size limit }
+        '415': { description: Expected application/zip }
+        '422': { description: ZIP or candidate provenance failed validation }
+    get:
+      summary: Download the original stored Rizzer witness ZIP
+      description: |
+        Operator-only attachment download. Returns the exact reviewed bytes
+        after validating persistent PoC digests and source provenance.
+        Cache-Control is no-store and the response is always an attachment.
+      operationId: downloadRizzerWitness
+      security: [{ operatorToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Stored ZIP as an opaque attachment
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { description: Operator authentication required }
+        '403': { description: Host is not loopback }
+        '404': { description: Finding or witness not found }
+        '500': { description: Stored witness failed integrity checks }
+
   /v1/scans:
     get:
       summary: Export scans across all repositories as JSONL
